@@ -31,6 +31,7 @@ products_coll = db["products"]
 users_coll = db["users"]
 counters_coll = db["counters"]
 carts_coll = db["carts"]
+wishlists_coll = db["wishlists"]
 
 SECRET_KEY = "aura-in-memory-secret-change-in-production"
 ALGORITHM = "HS256"
@@ -188,6 +189,10 @@ class CartItemIn(BaseModel):
     quantity: int = Field(default=1, ge=1)
 
 
+class WishlistItemIn(BaseModel):
+    productId: int
+
+
 @app.post("/api/auth/register", status_code=201)
 def register(payload: RegisterIn):
     email = payload.email.strip().lower()
@@ -334,3 +339,41 @@ def remove_from_cart(product_id: int, user: dict = Depends(get_current_user)):
     result = carts_coll.delete_one({"userId": user["_id"], "productId": product_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Item not in cart")
+
+
+def wishlist_items_for(user: dict) -> list:
+    doc = wishlists_coll.find_one({"_id": user["_id"]})
+    ids = doc.get("productIds", []) if doc else []
+    if not ids:
+        return []
+    by_id = {
+        p["_id"]: product_out(p) for p in products_coll.find({"_id": {"$in": ids}})
+    }
+    return [by_id[i] for i in ids if i in by_id]
+
+
+@app.get("/api/wishlist")
+def get_wishlist(user: dict = Depends(get_current_user)):
+    return {"items": wishlist_items_for(user)}
+
+
+@app.post("/api/wishlist/items", status_code=201)
+def add_to_wishlist(payload: WishlistItemIn, user: dict = Depends(get_current_user)):
+    if not products_coll.find_one({"_id": payload.productId}):
+        raise HTTPException(status_code=404, detail="Product not found")
+    wishlists_coll.update_one(
+        {"_id": user["_id"]},
+        {"$addToSet": {"productIds": payload.productId}},
+        upsert=True,
+    )
+    return {"items": wishlist_items_for(user)}
+
+
+@app.delete("/api/wishlist/items/{product_id}", status_code=204)
+def remove_from_wishlist(product_id: int, user: dict = Depends(get_current_user)):
+    result = wishlists_coll.update_one(
+        {"_id": user["_id"]},
+        {"$pull": {"productIds": product_id}},
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Item not in wishlist")

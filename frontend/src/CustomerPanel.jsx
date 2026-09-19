@@ -26,6 +26,12 @@ const InboxIcon = ({ className = 'h-4 w-4 shrink-0' }) => (
   </svg>
 )
 
+const HeartIcon = ({ className = 'h-4 w-4 shrink-0' }) => (
+  <svg {...iconProps} className={className}>
+    <path d="M12 20s-7-4.6-9.2-9A5.2 5.2 0 0 1 12 6.4 5.2 5.2 0 0 1 21.2 11C19 15.4 12 20 12 20Z" />
+  </svg>
+)
+
 const SearchIcon = ({ className = 'h-4 w-4 shrink-0' }) => (
   <svg {...iconProps} className={className}>
     <circle cx="11" cy="11" r="7" />
@@ -174,7 +180,7 @@ function MiniCart({ cart, onCheckout, setQuantity, removeFromCart }) {
   )
 }
 
-function ProductTile({ product, index, onAdd }) {
+function ProductTile({ product, index, onAdd, onToggleWishlist, isWished }) {
   const tints = ['from-teal-100/80', 'from-teal-200/70', 'from-paper-2/80']
   return (
     <article
@@ -195,6 +201,26 @@ function ProductTile({ product, index, onAdd }) {
         >
           <PlusIcon />
         </button>
+        <div className="group/wish absolute left-3 top-3">
+          <button
+            onClick={() => onToggleWishlist(product.id)}
+            aria-label={
+              isWished
+                ? `Remove ${product.name} from wishlist`
+                : `Add ${product.name} to wishlist`
+            }
+            className={`flex h-8 w-8 items-center justify-center rounded-full shadow-sm transition active:scale-90 ${
+              isWished
+                ? 'bg-rose-soft text-rose-deep'
+                : 'bg-paper-2/90 text-ink-faint hover:bg-rose-soft hover:text-rose-deep'
+            }`}
+          >
+            <HeartIcon className={`h-4 w-4 ${isWished ? 'fill-current' : ''}`} />
+          </button>
+          <span className="pointer-events-none absolute left-0 top-full z-10 mt-2 hidden whitespace-nowrap rounded-full bg-ink px-2.5 py-1 font-sans text-xs font-bold text-white opacity-0 shadow-md transition group-hover/wish:opacity-100 sm:block">
+            {isWished ? 'Remove from wishlist' : 'Add to wishlist'}
+          </span>
+        </div>
       </div>
       <div className="flex items-baseline justify-between gap-3 px-1.5">
         <h3 className="line-clamp-2 min-w-0 break-words font-serif text-lg font-semibold tracking-tight text-ink">
@@ -232,6 +258,7 @@ function CustomerPanel({ user, onLogout }) {
   const [data, setData] = useState({ categories: [], products: [] })
   const [cart, setCart] = useState({ items: [], total: 0 })
   const [cartOpen, setCartOpen] = useState(false)
+  const [wishlist, setWishlist] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
@@ -239,13 +266,15 @@ function CustomerPanel({ user, onLogout }) {
 
   async function refresh() {
     try {
-      const [categories, products, cart] = await Promise.all([
+      const [categories, products, cart, wishlist] = await Promise.all([
         api('/api/categories'),
         api('/api/products'),
         api('/api/cart'),
+        api('/api/wishlist'),
       ])
       setData({ categories, products })
       setCart(cart)
+      setWishlist(wishlist.items)
       return true
     } catch (err) {
       setError(err.message)
@@ -299,6 +328,26 @@ function CustomerPanel({ user, onLogout }) {
     }
   }
 
+  async function toggleWishlist(productId) {
+    const isWished = wishlistIds.has(productId)
+    try {
+      if (isWished) {
+        await api(`/api/wishlist/items/${productId}`, { method: 'DELETE' })
+      } else {
+        await api('/api/wishlist/items', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ productId }),
+        })
+      }
+      const next = await api('/api/wishlist')
+      setWishlist(next.items)
+      setError('')
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   const filteredProducts = useMemo(() => {
     const q = query.trim().toLowerCase()
     return data.products.filter((p) => {
@@ -308,6 +357,11 @@ function CustomerPanel({ user, onLogout }) {
       return inCategory && matchesQuery
     })
   }, [data.products, query, activeCategory])
+
+  const wishlistIds = useMemo(
+    () => new Set(wishlist.map((w) => w.id)),
+    [wishlist],
+  )
 
   const visibleCategories = useMemo(
     () =>
@@ -448,11 +502,36 @@ function CustomerPanel({ user, onLogout }) {
                   <SectionHeading title={category.name} count={category.items.length} />
                   <div className="grid grid-cols-2 gap-4 sm:gap-6 md:grid-cols-3 lg:grid-cols-4">
                     {category.items.map((p, i) => (
-                      <ProductTile key={p.id} product={p} index={i} onAdd={addToCart} />
+                      <ProductTile
+                        key={p.id}
+                        product={p}
+                        index={i}
+                        onAdd={addToCart}
+                        onToggleWishlist={toggleWishlist}
+                        isWished={wishlistIds.has(p.id)}
+                      />
                     ))}
                   </div>
                 </section>
               ))
+          )}
+
+          {wishlist.length > 0 && (
+            <section>
+              <SectionHeading title="Your wishlist" count={wishlist.length} />
+              <div className="grid grid-cols-2 gap-4 sm:gap-6 md:grid-cols-3 lg:grid-cols-4">
+                {wishlist.map((p, i) => (
+                  <ProductTile
+                    key={p.id}
+                    product={p}
+                    index={i}
+                    onAdd={addToCart}
+                    onToggleWishlist={toggleWishlist}
+                    isWished={wishlistIds.has(p.id)}
+                  />
+                ))}
+              </div>
+            </section>
           )}
         </main>
 
