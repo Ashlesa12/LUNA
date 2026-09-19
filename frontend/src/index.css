@@ -1,0 +1,46 @@
+@import url('https://fonts.googleapis.com/css2?family=Petrona:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Nunito Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-serif: 'Petrona', Georgia, 'Times New Roman', serif;
+
+  --color-paper: #f7f4ed;
+  --color-paper-2: #ffffff;
+  --color-line: #e6e4d9;
+  --color-teal-100: #def0ee;
+  --color-teal-200: #c2e3e0;
+  --color-teal-300: #9fd0cc;
+  --color-teal-600: #2e837d;
+  --color-teal-700: #256863;
+  --color-ink: #2f332f;
+  --color-ink-soft: #6d7268;
+  --color-ink-faint: #a6ada0;
+  --color-rose: #bb5048;
+  --color-rose-deep: #96433c;
+  --color-rose-soft: #fbeae7;
+
+  --animate-fade-up: fade-up 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+body {
+  background-color: var(--color-paper);
+  background-image: linear-gradient(
+    to bottom,
+    #e8f3f1 0px,
+    var(--color-paper) 280px
+  );
+  background-repeat: no-repeat;
+}
