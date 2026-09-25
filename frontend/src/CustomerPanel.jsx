@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, formatPrice } from './api.js'
 
 const iconProps = {
@@ -254,6 +254,41 @@ function SectionHeading({ title, count }) {
   )
 }
 
+function consumePaymentResult() {
+  const params = new URLSearchParams(window.location.search)
+  const encodedPayment = params.get('data')
+  let result = null
+
+  if (encodedPayment) {
+    try {
+      const normalizedPayment = encodedPayment.replace(/\s/g, '+')
+      const paddedPayment = normalizedPayment.padEnd(
+        Math.ceil(normalizedPayment.length / 4) * 4,
+        '=',
+      )
+      const paymentData = JSON.parse(atob(paddedPayment))
+      result = paymentData.status === 'COMPLETE' ? 'success' : 'failure'
+    } catch {
+      result = null
+    }
+  }
+
+  if (!result) {
+    const legacyResult = (params.get('payment') || '').split('?')[0]
+    if (legacyResult === 'success') result = 'success'
+    if (legacyResult === 'failure') result = 'failure'
+  }
+
+  if (!result) return null
+
+  params.delete('payment')
+  params.delete('data')
+  const query = params.toString()
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
+  window.history.replaceState({}, document.title, nextUrl)
+  return result
+}
+
 function CustomerPanel({ user, onLogout }) {
   const [data, setData] = useState({ categories: [], products: [] })
   const [cart, setCart] = useState({ items: [], total: 0 })
@@ -261,8 +296,10 @@ function CustomerPanel({ user, onLogout }) {
   const [wishlist, setWishlist] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [paymentStatus, setPaymentStatus] = useState('')
   const [query, setQuery] = useState('')
   const [activeCategory, setActiveCategory] = useState('all')
+  const paymentInitializationStarted = useRef(false)
 
   async function refresh() {
     try {
@@ -282,8 +319,36 @@ function CustomerPanel({ user, onLogout }) {
     }
   }
 
+  async function clearCartAfterPayment() {
+    setPaymentStatus('clearing')
+    setError('')
+    try {
+      await api('/api/cart', { method: 'DELETE' })
+      setCart({ items: [], total: 0 })
+      setPaymentStatus('success')
+      return true
+    } catch {
+      setPaymentStatus('error')
+      return false
+    }
+  }
+
   useEffect(() => {
-    refresh().finally(() => setLoading(false))
+    if (paymentInitializationStarted.current) return
+    paymentInitializationStarted.current = true
+
+    const paymentResult = consumePaymentResult()
+
+    async function initialize() {
+      if (paymentResult === 'success') {
+        await clearCartAfterPayment()
+      } else if (paymentResult === 'failure') {
+        setPaymentStatus('failure')
+      }
+      await refresh()
+    }
+
+    initialize().finally(() => setLoading(false))
   }, [])
 
   async function addToCart(productId) {
@@ -323,6 +388,48 @@ function CustomerPanel({ user, onLogout }) {
       await api(`/api/cart/items/${productId}`, { method: 'DELETE' })
       setError('')
       await refresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function checkoutWithEsewa() {
+    try {
+      setError('')
+
+      if (cart.items.length === 0) {
+        setError('Your cart is empty.')
+        return
+      }
+
+      const payment = await api('/api/esewa/initiate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          amount: cart.total,
+        }),
+      })
+
+      const form = document.createElement('form')
+
+      form.method = 'POST'
+      form.action = payment.payment_url
+
+      Object.entries(payment.fields).forEach(([key, value]) => {
+        const input = document.createElement('input')
+
+        input.type = 'hidden'
+        input.name = key
+        input.value = value
+
+        form.appendChild(input)
+      })
+
+      document.body.appendChild(form)
+
+      form.submit()
     } catch (err) {
       setError(err.message)
     }
@@ -404,6 +511,55 @@ function CustomerPanel({ user, onLogout }) {
         </header>
 
         <main className="space-y-12 px-6 pb-20">
+          {paymentStatus && (
+            <div
+              role="status"
+              aria-live="polite"
+              className={`flex items-center justify-between gap-4 rounded-2xl border px-4 py-3 font-sans shadow-sm ${
+                paymentStatus === 'failure' || paymentStatus === 'error'
+                  ? 'border-rose/40 bg-rose-soft text-rose-deep'
+                  : 'border-teal-300 bg-teal-100/70 text-teal-700'
+              }`}
+            >
+              <div>
+                <p className="text-sm font-bold">
+                  {paymentStatus === 'clearing' && 'Finishing your order'}
+                  {paymentStatus === 'success' && 'Payment complete'}
+                  {paymentStatus === 'failure' && 'Payment not completed'}
+                  {paymentStatus === 'error' && 'Cart update needed'}
+                </p>
+                <p className="mt-0.5 text-sm font-medium">
+                  {paymentStatus === 'clearing' &&
+                    'Your payment returned successfully. Clearing your cart now.'}
+                  {paymentStatus === 'success' &&
+                    'Your cart is now empty. Thank you for shopping with LUNA.'}
+                  {paymentStatus === 'failure' &&
+                    'Your cart was kept so you can try the payment again.'}
+                  {paymentStatus === 'error' &&
+                    'Your payment returned successfully, but we could not clear the cart.'}
+                </p>
+              </div>
+              {paymentStatus === 'error' ? (
+                <button
+                  type="button"
+                  onClick={clearCartAfterPayment}
+                  className="shrink-0 rounded-full border border-current px-4 py-2 text-sm font-bold transition hover:bg-white/60"
+                >
+                  Retry
+                </button>
+              ) : paymentStatus !== 'clearing' ? (
+                <button
+                  type="button"
+                  onClick={() => setPaymentStatus('')}
+                  aria-label="Dismiss payment status"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition hover:bg-white/60"
+                >
+                  <CloseIcon />
+                </button>
+              ) : null}
+            </div>
+          )}
+
           {error && (
             <div className="rounded-2xl border border-rose/40 bg-rose-soft px-4 py-3 font-sans text-sm font-semibold text-rose-deep">
               {error}
@@ -636,13 +792,19 @@ function CustomerPanel({ user, onLogout }) {
                       {formatPrice(cart.total)}
                     </span>
                   </div>
-                  <button className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-full bg-teal-600 px-5 py-3 font-sans text-sm font-bold text-white shadow-sm transition hover:bg-teal-700 active:scale-[0.99]">
+                  <button
+                    type="button"
+                    onClick={checkoutWithEsewa}
+                    className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-full bg-teal-600 px-5 py-3 font-sans text-sm font-bold text-white shadow-sm transition hover:bg-teal-700 active:scale-[0.99]"
+                  >
                     <BagIcon />
-                    Checkout
+                    Pay with eSewa
                   </button>
+
                   <p className="mt-3 text-center font-sans text-xs font-medium text-ink-soft">
-                    Checkout is a demo — no real orders yet.
+                    Secure payment through eSewa test environment.
                   </p>
+
                 </div>
               </>
             )}

@@ -1,12 +1,17 @@
+import base64
 import hashlib
+import hmac
+import json
 import os
 import re
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt as pyjwt
 import pymongo
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -38,6 +43,13 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+# eSewa Test Configuration
+ESEWA_PRODUCT_CODE = "EPAYTEST"
+ESEWA_SECRET_KEY = "8gBm/:&EnhH.1/q"
+ESEWA_PAYMENT_URL = "https://rc-epay.esewa.com.np/api/epay/main/v2/form"
+
+FRONTEND_URL = "http://localhost:5173"
 
 
 def next_id(collection: str) -> int:
@@ -192,6 +204,9 @@ class CartItemIn(BaseModel):
 class WishlistItemIn(BaseModel):
     productId: int
 
+class EsewaPaymentIn(BaseModel):
+    amount: float = Field(gt=0)
+
 
 @app.post("/api/auth/register", status_code=201)
 def register(payload: RegisterIn):
@@ -308,6 +323,11 @@ def get_cart(user: dict = Depends(get_current_user)):
     return cart_items_for(user)
 
 
+@app.delete("/api/cart", status_code=204)
+def clear_cart(user: dict = Depends(get_current_user)):
+    carts_coll.delete_many({"userId": user["_id"]})
+
+
 @app.post("/api/cart/items", status_code=201)
 def add_to_cart(payload: CartItemIn, user: dict = Depends(get_current_user)):
     if not products_coll.find_one({"_id": payload.productId}):
@@ -377,3 +397,45 @@ def remove_from_wishlist(product_id: int, user: dict = Depends(get_current_user)
     )
     if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="Item not in wishlist")
+
+@app.post("/api/esewa/initiate")
+def initiate_esewa_payment(
+    payload: EsewaPaymentIn,
+    user: dict = Depends(get_current_user),
+):
+    amount = round(payload.amount, 2)
+
+    transaction_uuid = f"LUNA-{uuid.uuid4().hex[:12]}"
+
+    signed_field_names = "total_amount,transaction_uuid,product_code"
+
+    message = (
+        f"total_amount={amount},"
+        f"transaction_uuid={transaction_uuid},"
+        f"product_code={ESEWA_PRODUCT_CODE}"
+    )
+
+    signature = base64.b64encode(
+        hmac.new(
+            ESEWA_SECRET_KEY.encode(),
+            message.encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode()
+
+    return {
+        "payment_url": ESEWA_PAYMENT_URL,
+        "fields": {
+            "amount": str(amount),
+            "tax_amount": "0",
+            "total_amount": str(amount),
+            "transaction_uuid": transaction_uuid,
+            "product_code": ESEWA_PRODUCT_CODE,
+            "product_service_charge": "0",
+            "product_delivery_charge": "0",
+            "success_url": f"{FRONTEND_URL}/payment/success",
+            "failure_url": f"{FRONTEND_URL}/payment/failure",
+            "signed_field_names": signed_field_names,
+            "signature": signature,
+        },
+    }
