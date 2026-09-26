@@ -4,6 +4,12 @@ import AuthPage from './AuthPage.jsx'
 import AdminPanel from './AdminPanel.jsx'
 import CustomerPanel from './CustomerPanel.jsx'
 
+function trackEvent(eventName, eventParams = {}) {
+  if (typeof window.gtag === 'function') {
+    window.gtag('event', eventName, eventParams)
+  }
+}
+
 function Splash() {
   return (
     <div className="flex min-h-screen items-center justify-center text-ink">

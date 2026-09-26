@@ -10,11 +10,14 @@ from datetime import datetime, timedelta, timezone
 
 import jwt as pyjwt
 import pymongo
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
+
+load_dotenv()
 
 app = FastAPI(title="E-Commerce Store API")
 
@@ -38,18 +41,22 @@ counters_coll = db["counters"]
 carts_coll = db["carts"]
 wishlists_coll = db["wishlists"]
 
-SECRET_KEY = "aura-in-memory-secret-change-in-production"
+SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY", "aura-in-memory-secret-change-in-production"
+)
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
 # eSewa Test Configuration
-ESEWA_PRODUCT_CODE = "EPAYTEST"
-ESEWA_SECRET_KEY = "8gBm/:&EnhH.1/q"
-ESEWA_PAYMENT_URL = "https://rc-epay.esewa.com.np/api/epay/main/v2/form"
+ESEWA_PRODUCT_CODE = os.getenv("ESEWA_PRODUCT_CODE", "EPAYTEST")
+ESEWA_SECRET_KEY = os.getenv("ESEWA_SECRET_KEY", "8gBm/:&EnhH.1/q")
+ESEWA_PAYMENT_URL = os.getenv(
+    "ESEWA_PAYMENT_URL", "https://rc-epay.esewa.com.np/api/epay/main/v2/form"
+)
 
-FRONTEND_URL = "http://localhost:5173"
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 
 
 def next_id(collection: str) -> int:
