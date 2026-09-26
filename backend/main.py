@@ -40,6 +40,7 @@ users_coll = db["users"]
 counters_coll = db["counters"]
 carts_coll = db["carts"]
 wishlists_coll = db["wishlists"]
+orders_coll = db["orders"]
 
 SECRET_KEY = os.getenv(
     "JWT_SECRET_KEY", "aura-in-memory-secret-change-in-production"
@@ -114,6 +115,25 @@ def product_out(product: dict) -> dict:
         "name": product["name"],
         "price": product["price"],
         "categoryId": product["categoryId"],
+    }
+
+
+def order_out(order: dict) -> dict:
+    paid_at = order.get("paidAt")
+    return {
+        "id": order["_id"],
+        "items": order["items"],
+        "itemCount": sum(i["quantity"] for i in order["items"]),
+        "total": order["total"],
+        "status": order["status"],
+        "paymentMethod": order["paymentMethod"],
+        "transactionUuid": order.get("transactionUuid"),
+        "createdAt": order["createdAt"].isoformat(),
+        "paidAt": paid_at.isoformat() if paid_at else None,
+        "customer": {
+            "name": order["customerName"],
+            "email": order["customerEmail"],
+        },
     }
 
 
@@ -210,6 +230,11 @@ class CartItemIn(BaseModel):
 
 class WishlistItemIn(BaseModel):
     productId: int
+
+
+class PaymentConfirmIn(BaseModel):
+    transactionUuid: str
+    status: str = Field(pattern="^(success|failure)$")
 
 class EsewaPaymentIn(BaseModel):
     amount: float = Field(gt=0)
@@ -368,6 +393,111 @@ def remove_from_cart(product_id: int, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Item not in cart")
 
 
+def find_order(order_id: int, user: dict) -> dict:
+    order = orders_coll.find_one({"_id": order_id, "userId": user["_id"]})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return order
+
+
+def same_items(left: list, right: list) -> bool:
+    def key(items: list) -> list:
+        return sorted((i["id"], i["quantity"]) for i in items)
+
+    return key(left) == key(right)
+
+
+def remove_items_from_cart(user: dict, items: list) -> None:
+    for item in items:
+        carts_coll.update_one(
+            {"userId": user["_id"], "productId": item["id"]},
+            {"$inc": {"quantity": -item["quantity"]}},
+        )
+    carts_coll.delete_many({"userId": user["_id"], "quantity": {"$lte": 0}})
+
+
+def create_order(user: dict) -> dict:
+    cart = cart_items_for(user)
+    if not cart["items"]:
+        raise HTTPException(status_code=400, detail="Your cart is empty")
+
+    unpaid = orders_coll.find({"userId": user["_id"], "status": {"$ne": "paid"}})
+    for existing in unpaid:
+        if same_items(existing["items"], cart["items"]):
+            return order_out(existing)
+
+    order = {
+        "_id": next_id("orders"),
+        "userId": user["_id"],
+        "customerName": user["name"],
+        "customerEmail": user["email"],
+        "items": cart["items"],
+        "total": cart["total"],
+        "status": "awaiting_payment",
+        "paymentMethod": "esewa",
+        "transactionUuid": None,
+        "paidAt": None,
+        "createdAt": datetime.now(timezone.utc),
+    }
+    orders_coll.insert_one(order)
+    remove_items_from_cart(user, cart["items"])
+    return order_out(order)
+
+
+@app.get("/api/orders")
+def list_orders(user: dict = Depends(get_current_user)):
+    orders = orders_coll.find({"userId": user["_id"]}).sort("_id", -1)
+    return [order_out(o) for o in orders]
+
+
+@app.post("/api/orders", status_code=201)
+def checkout(user: dict = Depends(get_current_user)):
+    return create_order(user)
+
+
+@app.get("/api/orders/{order_id}")
+def get_order(order_id: int, user: dict = Depends(get_current_user)):
+    return order_out(find_order(order_id, user))
+
+
+@app.post("/api/orders/{order_id}/payment")
+def start_order_payment(
+    order_id: int, user: dict = Depends(get_current_user)
+):
+    order = find_order(order_id, user)
+    if order["status"] == "paid":
+        raise HTTPException(status_code=409, detail="Order is already paid")
+    transaction_uuid = f"LUNA-{uuid.uuid4().hex[:12]}"
+    orders_coll.update_one(
+        {"_id": order_id}, {"$set": {"transactionUuid": transaction_uuid}}
+    )
+    return {
+        "order": order_out({**order, "transactionUuid": transaction_uuid}),
+        "payment_url": ESEWA_PAYMENT_URL,
+        "fields": esewa_payment_fields(order["total"], transaction_uuid),
+    }
+
+
+@app.post("/api/orders/payment/confirm")
+def confirm_order_payment(
+    payload: PaymentConfirmIn, user: dict = Depends(get_current_user)
+):
+    order = orders_coll.find_one(
+        {"transactionUuid": payload.transactionUuid, "userId": user["_id"]}
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="No order for this payment")
+    if order["status"] == "paid":
+        return order_out(order)
+    update = (
+        {"status": "paid", "paidAt": datetime.now(timezone.utc)}
+        if payload.status == "success"
+        else {"status": "payment_failed"}
+    )
+    orders_coll.update_one({"_id": order["_id"]}, {"$set": update})
+    return order_out(orders_coll.find_one({"_id": order["_id"]}))
+
+
 def wishlist_items_for(user: dict) -> list:
     doc = wishlists_coll.find_one({"_id": user["_id"]})
     ids = doc.get("productIds", []) if doc else []
@@ -405,14 +535,8 @@ def remove_from_wishlist(product_id: int, user: dict = Depends(get_current_user)
     if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="Item not in wishlist")
 
-@app.post("/api/esewa/initiate")
-def initiate_esewa_payment(
-    payload: EsewaPaymentIn,
-    user: dict = Depends(get_current_user),
-):
-    amount = round(payload.amount, 2)
-
-    transaction_uuid = f"LUNA-{uuid.uuid4().hex[:12]}"
+def esewa_payment_fields(amount: float, transaction_uuid: str) -> dict:
+    amount = round(amount, 2)
 
     signed_field_names = "total_amount,transaction_uuid,product_code"
 
@@ -431,18 +555,28 @@ def initiate_esewa_payment(
     ).decode()
 
     return {
+        "amount": str(amount),
+        "tax_amount": "0",
+        "total_amount": str(amount),
+        "transaction_uuid": transaction_uuid,
+        "product_code": ESEWA_PRODUCT_CODE,
+        "product_service_charge": "0",
+        "product_delivery_charge": "0",
+        "success_url": f"{FRONTEND_URL}/payment/success",
+        "failure_url": f"{FRONTEND_URL}/payment/failure",
+        "signed_field_names": signed_field_names,
+        "signature": signature,
+    }
+
+
+@app.post("/api/esewa/initiate")
+def initiate_esewa_payment(
+    payload: EsewaPaymentIn,
+    user: dict = Depends(get_current_user),
+):
+    return {
         "payment_url": ESEWA_PAYMENT_URL,
-        "fields": {
-            "amount": str(amount),
-            "tax_amount": "0",
-            "total_amount": str(amount),
-            "transaction_uuid": transaction_uuid,
-            "product_code": ESEWA_PRODUCT_CODE,
-            "product_service_charge": "0",
-            "product_delivery_charge": "0",
-            "success_url": f"{FRONTEND_URL}/payment/success",
-            "failure_url": f"{FRONTEND_URL}/payment/failure",
-            "signed_field_names": signed_field_names,
-            "signature": signature,
-        },
+        "fields": esewa_payment_fields(
+            payload.amount, f"LUNA-{uuid.uuid4().hex[:12]}"
+        ),
     }

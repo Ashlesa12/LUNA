@@ -81,6 +81,52 @@ const CloseIcon = ({ className = 'h-4 w-4 shrink-0' }) => (
   </svg>
 )
 
+const ReceiptIcon = ({ className = 'h-4 w-4 shrink-0' }) => (
+  <svg {...iconProps} className={className}>
+    <path d="M5 3h14v18l-2.5-1.5L14 21l-2-1.5L10 21l-2.5-1.5L5 21V3Z" />
+    <path d="M9 8h6M9 12h6" />
+  </svg>
+)
+
+const CheckIcon = ({ className = 'h-4 w-4 shrink-0' }) => (
+  <svg {...iconProps} className={className}>
+    <path d="m4 12.5 5 5L20 6.5" />
+  </svg>
+)
+
+const ORDER_STATUS = {
+  awaiting_payment: {
+    label: 'Awaiting payment',
+    badge: 'border-line bg-paper text-ink-soft',
+  },
+  payment_failed: {
+    label: 'Payment failed',
+    badge: 'border-rose/40 bg-rose-soft text-rose-deep',
+  },
+  paid: {
+    label: 'Paid',
+    badge: 'border-teal-300 bg-teal-100/70 text-teal-700',
+  },
+}
+
+function statusMeta(status) {
+  return (
+    ORDER_STATUS[status] || {
+      label: status,
+      badge: 'border-line bg-paper text-ink-soft',
+    }
+  )
+}
+
+function formatDate(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleString('en-IN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
+}
+
 function MiniCart({ cart, onCheckout, setQuantity, removeFromCart }) {
   const [open, setOpen] = useState(true)
   const count = cart.items.reduce((n, i) => n + i.quantity, 0)
@@ -267,7 +313,10 @@ function consumePaymentResult() {
         '=',
       )
       const paymentData = JSON.parse(atob(paddedPayment))
-      result = paymentData.status === 'COMPLETE' ? 'success' : 'failure'
+      result = {
+        status: paymentData.status === 'COMPLETE' ? 'success' : 'failure',
+        transactionUuid: paymentData.transaction_uuid || '',
+      }
     } catch {
       result = null
     }
@@ -275,8 +324,8 @@ function consumePaymentResult() {
 
   if (!result) {
     const legacyResult = (params.get('payment') || '').split('?')[0]
-    if (legacyResult === 'success') result = 'success'
-    if (legacyResult === 'failure') result = 'failure'
+    if (legacyResult === 'success') result = { status: 'success' }
+    if (legacyResult === 'failure') result = { status: 'failure' }
   }
 
   if (!result) return null
@@ -289,29 +338,56 @@ function consumePaymentResult() {
   return result
 }
 
+function submitEsewaForm(payment) {
+  const form = document.createElement('form')
+
+  form.method = 'POST'
+  form.action = payment.payment_url
+
+  Object.entries(payment.fields).forEach(([key, value]) => {
+    const input = document.createElement('input')
+
+    input.type = 'hidden'
+    input.name = key
+    input.value = value
+
+    form.appendChild(input)
+  })
+
+  document.body.appendChild(form)
+
+  form.submit()
+}
+
 function CustomerPanel({ user, onLogout }) {
   const [data, setData] = useState({ categories: [], products: [] })
   const [cart, setCart] = useState({ items: [], total: 0 })
   const [cartOpen, setCartOpen] = useState(false)
   const [wishlist, setWishlist] = useState([])
+  const [orders, setOrders] = useState([])
+  const [activeOrder, setActiveOrder] = useState(null)
+  const [orderOpen, setOrderOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [paymentStatus, setPaymentStatus] = useState('')
+  const [pendingPayment, setPendingPayment] = useState(null)
   const [query, setQuery] = useState('')
   const [activeCategory, setActiveCategory] = useState('all')
   const paymentInitializationStarted = useRef(false)
 
   async function refresh() {
     try {
-      const [categories, products, cart, wishlist] = await Promise.all([
+      const [categories, products, cart, wishlist, orders] = await Promise.all([
         api('/api/categories'),
         api('/api/products'),
         api('/api/cart'),
         api('/api/wishlist'),
+        api('/api/orders'),
       ])
       setData({ categories, products })
       setCart(cart)
       setWishlist(wishlist.items)
+      setOrders(orders)
       return true
     } catch (err) {
       setError(err.message)
@@ -319,17 +395,25 @@ function CustomerPanel({ user, onLogout }) {
     }
   }
 
-  async function clearCartAfterPayment() {
+  async function confirmPaymentResult(result) {
+    if (!result) return
     setPaymentStatus('clearing')
     setError('')
     try {
-      await api('/api/cart', { method: 'DELETE' })
-      setCart({ items: [], total: 0 })
-      setPaymentStatus('success')
-      return true
+      if (result.transactionUuid) {
+        await api('/api/orders/payment/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transactionUuid: result.transactionUuid,
+            status: result.status,
+          }),
+        })
+      }
+      await refresh()
+      setPaymentStatus(result.status === 'success' ? 'success' : 'failure')
     } catch {
       setPaymentStatus('error')
-      return false
     }
   }
 
@@ -340,10 +424,9 @@ function CustomerPanel({ user, onLogout }) {
     const paymentResult = consumePaymentResult()
 
     async function initialize() {
-      if (paymentResult === 'success') {
-        await clearCartAfterPayment()
-      } else if (paymentResult === 'failure') {
-        setPaymentStatus('failure')
+      if (paymentResult) {
+        setPendingPayment(paymentResult)
+        await confirmPaymentResult(paymentResult)
       }
       await refresh()
     }
@@ -369,6 +452,7 @@ function CustomerPanel({ user, onLogout }) {
     try {
       if (quantity <= 0) {
         await api(`/api/cart/items/${productId}`, { method: 'DELETE' })
+        await refresh()
       } else {
         const next = await api(`/api/cart/items/${productId}`, {
           method: 'PUT',
@@ -393,7 +477,7 @@ function CustomerPanel({ user, onLogout }) {
     }
   }
 
-  async function checkoutWithEsewa() {
+  async function checkoutNow() {
     try {
       setError('')
 
@@ -402,37 +486,35 @@ function CustomerPanel({ user, onLogout }) {
         return
       }
 
-      const payment = await api('/api/esewa/initiate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          amount: cart.total,
-        }),
-      })
+      const order = await api('/api/orders', { method: 'POST' })
 
-      const form = document.createElement('form')
-
-      form.method = 'POST'
-      form.action = payment.payment_url
-
-      Object.entries(payment.fields).forEach(([key, value]) => {
-        const input = document.createElement('input')
-
-        input.type = 'hidden'
-        input.name = key
-        input.value = value
-
-        form.appendChild(input)
-      })
-
-      document.body.appendChild(form)
-
-      form.submit()
+      await refresh()
+      setActiveOrder(order)
+      setOrderOpen(true)
+      setCartOpen(false)
+      setPaymentStatus('placed')
     } catch (err) {
       setError(err.message)
     }
+  }
+
+  async function payWithEsewa(order) {
+    try {
+      setError('')
+
+      const payment = await api(`/api/orders/${order.id}/payment`, {
+        method: 'POST',
+      })
+
+      submitEsewaForm(payment)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  function openOrder(order) {
+    setActiveOrder(order)
+    setOrderOpen(true)
   }
 
   async function toggleWishlist(productId) {
@@ -523,26 +605,29 @@ function CustomerPanel({ user, onLogout }) {
             >
               <div>
                 <p className="text-sm font-bold">
-                  {paymentStatus === 'clearing' && 'Finishing your order'}
+                  {paymentStatus === 'clearing' && 'Confirming your payment'}
+                  {paymentStatus === 'placed' && 'Order placed'}
                   {paymentStatus === 'success' && 'Payment complete'}
                   {paymentStatus === 'failure' && 'Payment not completed'}
-                  {paymentStatus === 'error' && 'Cart update needed'}
+                  {paymentStatus === 'error' && 'Payment update needed'}
                 </p>
                 <p className="mt-0.5 text-sm font-medium">
                   {paymentStatus === 'clearing' &&
-                    'Your payment returned successfully. Clearing your cart now.'}
+                    'Your payment returned successfully. Updating your order now.'}
+                  {paymentStatus === 'placed' &&
+                    'Review the items you ordered, then pay with eSewa to confirm.'}
                   {paymentStatus === 'success' &&
-                    'Your cart is now empty. Thank you for shopping with LUNA.'}
+                    'Your order is paid. Thank you for shopping with LUNA.'}
                   {paymentStatus === 'failure' &&
-                    'Your cart was kept so you can try the payment again.'}
+                    'Your order is unpaid, so you can try the payment again.'}
                   {paymentStatus === 'error' &&
-                    'Your payment returned successfully, but we could not clear the cart.'}
+                    'Your payment returned successfully, but we could not update your order.'}
                 </p>
               </div>
               {paymentStatus === 'error' ? (
                 <button
                   type="button"
-                  onClick={clearCartAfterPayment}
+                  onClick={() => confirmPaymentResult(pendingPayment)}
                   className="shrink-0 rounded-full border border-current px-4 py-2 text-sm font-bold transition hover:bg-white/60"
                 >
                   Retry
@@ -689,6 +774,99 @@ function CustomerPanel({ user, onLogout }) {
               </div>
             </section>
           )}
+          {orders.length > 0 && (
+            <section id="order-list" className="scroll-mt-6">
+              <div className="mb-5 flex items-baseline justify-between gap-3 border-b border-line pb-3">
+                <h2 className="font-serif text-2xl font-semibold tracking-tight text-ink">
+                  Order list
+                </h2>
+                <span className="font-sans text-xs font-bold uppercase tracking-wide text-ink-soft">
+                  {orders.length} {orders.length === 1 ? 'order' : 'orders'}
+                </span>
+              </div>
+              <div className="space-y-4">
+                {orders.map((order) => (
+                  <article
+                    key={order.id}
+                    className="overflow-hidden rounded-3xl border border-line bg-paper-2 shadow-[0_16px_40px_-28px_rgba(47,51,44,0.4)]"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-paper px-6 py-4">
+                      <button
+                        type="button"
+                        onClick={() => openOrder(order)}
+                        className="flex items-center gap-3 text-left"
+                      >
+                        <span className="flex h-9 w-9 items-center justify-center rounded-full bg-teal-100 text-teal-700">
+                          <ReceiptIcon />
+                        </span>
+                        <span>
+                          <span className="block font-serif text-base font-semibold text-ink">
+                            {formatDate(order.createdAt)}
+                          </span>
+                          <span className="block font-sans text-xs text-ink-soft">
+                            {order.itemCount}{' '}
+                            {order.itemCount === 1 ? 'item' : 'items'} ordered
+                          </span>
+                        </span>
+                      </button>
+                      <span
+                        className={`rounded-full border px-3 py-1.5 font-sans text-xs font-bold uppercase tracking-wide ${statusMeta(order.status).badge}`}
+                      >
+                        {statusMeta(order.status).label}
+                      </span>
+                    </div>
+
+                    <ul className="divide-y divide-line px-6">
+                      {order.items.map((item) => (
+                        <li
+                          key={item.id}
+                          className="flex items-center justify-between gap-4 py-4"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate font-serif text-sm font-semibold text-ink">
+                              {item.name}
+                            </p>
+                            <p className="font-sans text-xs text-ink-soft">
+                              {formatPrice(item.price)} × {item.quantity}
+                            </p>
+                          </div>
+                          <p className="shrink-0 font-serif text-sm font-semibold tabular-nums text-teal-700">
+                            {formatPrice(item.price * item.quantity)}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+
+                    <div className="flex flex-wrap items-center justify-between gap-4 border-t border-line px-6 py-4">
+                      <div className="flex items-baseline gap-3">
+                        <span className="font-sans text-sm font-bold uppercase tracking-wide text-ink-soft">
+                          Order total
+                        </span>
+                        <span className="font-serif text-xl font-semibold tabular-nums text-teal-700">
+                          {formatPrice(order.total)}
+                        </span>
+                      </div>
+                      {order.status === 'paid' ? (
+                        <span className="inline-flex items-center gap-1.5 font-sans text-sm font-bold text-teal-700">
+                          <CheckIcon />
+                          Paid
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => payWithEsewa(order)}
+                          className="inline-flex items-center gap-2 rounded-full bg-teal-600 px-5 py-2.5 font-sans text-sm font-bold text-white shadow-sm transition hover:bg-teal-700 active:scale-[0.98]"
+                        >
+                          <BagIcon />
+                          Pay with eSewa
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
         </main>
 
         <footer className="border-t border-line px-6 py-8">
@@ -794,20 +972,124 @@ function CustomerPanel({ user, onLogout }) {
                   </div>
                   <button
                     type="button"
-                    onClick={checkoutWithEsewa}
+                    onClick={checkoutNow}
                     className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-full bg-teal-600 px-5 py-3 font-sans text-sm font-bold text-white shadow-sm transition hover:bg-teal-700 active:scale-[0.99]"
                   >
-                    <BagIcon />
-                    Pay with eSewa
+                    <CheckIcon />
+                    Checkout
                   </button>
 
                   <p className="mt-3 text-center font-sans text-xs font-medium text-ink-soft">
-                    Secure payment through eSewa test environment.
+                    You will review your ordered items before paying.
                   </p>
 
                 </div>
               </>
             )}
+          </aside>
+        </div>
+      )}
+      {orderOpen && activeOrder && (
+        <div className="fixed inset-0 z-50" role="dialog" aria-modal="true">
+          <div
+            className="absolute inset-0 bg-ink/40 backdrop-blur-sm"
+            onClick={() => setOrderOpen(false)}
+          />
+          <aside className="absolute right-0 top-0 flex h-full w-full max-w-md flex-col bg-paper-2 shadow-2xl animate-fade-up">
+            <div className="flex items-center justify-between border-b border-line px-6 py-5">
+              <div>
+                <h2 className="font-serif text-2xl font-semibold tracking-tight text-ink">
+                  Your order
+                </h2>
+                <p className="font-sans text-xs text-ink-soft">
+                  {formatDate(activeOrder.createdAt)} · {activeOrder.itemCount}{' '}
+                  {activeOrder.itemCount === 1 ? 'item' : 'items'}
+                </p>
+              </div>
+              <button
+                onClick={() => setOrderOpen(false)}
+                aria-label="Close order"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-ink-soft transition hover:bg-rose-soft hover:text-rose-deep"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+
+            <div className="border-b border-line bg-paper px-6 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-sans text-sm font-bold text-ink">
+                  {statusMeta(activeOrder.status).label}
+                </span>
+                <span
+                  className={`rounded-full border px-3 py-1.5 font-sans text-xs font-bold uppercase tracking-wide ${statusMeta(activeOrder.status).badge}`}
+                >
+                  {activeOrder.status === 'paid' ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <CheckIcon className="h-3.5 w-3.5" />
+                      Paid
+                    </span>
+                  ) : (
+                    statusMeta(activeOrder.status).label
+                  )}
+                </span>
+              </div>
+              <p className="mt-1.5 font-sans text-xs font-medium text-ink-soft">
+                {activeOrder.status === 'paid'
+                  ? `Paid on ${formatDate(activeOrder.paidAt)}.`
+                  : 'These are the items you ordered. Pay to confirm.'}
+              </p>
+            </div>
+
+            <ul className="flex-1 divide-y divide-line overflow-y-auto px-6">
+              {activeOrder.items.map((item) => (
+                <li
+                  key={item.id}
+                  className="flex items-center justify-between gap-4 py-5"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-serif text-base font-semibold text-ink">
+                      {item.name}
+                    </p>
+                    <p className="mt-0.5 font-sans text-sm text-ink-soft">
+                      {formatPrice(item.price)} × {item.quantity}
+                    </p>
+                  </div>
+                  <p className="shrink-0 font-serif text-base font-semibold tabular-nums text-teal-700">
+                    {formatPrice(item.price * item.quantity)}
+                  </p>
+                </li>
+              ))}
+            </ul>
+
+            <div className="border-t border-line px-6 py-5">
+              <div className="flex items-baseline justify-between">
+                <span className="font-sans text-sm font-bold uppercase tracking-wide text-ink-soft">
+                  Total
+                </span>
+                <span className="font-serif text-2xl font-semibold tabular-nums text-teal-700">
+                  {formatPrice(activeOrder.total)}
+                </span>
+              </div>
+
+              {activeOrder.status === 'paid' ? (
+                <p className="mt-4 text-center font-sans text-xs font-medium text-ink-soft">
+                  This order is paid. Thank you for shopping with LUNA.
+                </p>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => payWithEsewa(activeOrder)}
+                  className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-full bg-teal-600 px-5 py-3 font-sans text-sm font-bold text-white shadow-sm transition hover:bg-teal-700 active:scale-[0.99]"
+                >
+                  <BagIcon />
+                  Pay with eSewa
+                </button>
+              )}
+
+              <p className="mt-3 text-center font-sans text-xs font-medium text-ink-soft">
+                Secure payment through eSewa test environment.
+              </p>
+            </div>
           </aside>
         </div>
       )}

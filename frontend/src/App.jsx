@@ -1,14 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api, formatPrice, getToken, setToken } from './api.js'
 import AuthPage from './AuthPage.jsx'
 import AdminPanel from './AdminPanel.jsx'
 import CustomerPanel from './CustomerPanel.jsx'
-
-function trackEvent(eventName, eventParams = {}) {
-  if (typeof window.gtag === 'function') {
-    window.gtag('event', eventName, eventParams)
-  }
-}
 
 function Splash() {
   return (
@@ -59,7 +53,7 @@ function CheckIcon() {
 function CloseIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-8 w-8">
-      <path d="m6 6 12 12M18 6 6 18" strokeLinecap="round" />
+      <path d="m6 6l12 12M18 6L6 18" strokeLinecap="round" />
     </svg>
   )
 }
@@ -73,39 +67,14 @@ function InfoIcon() {
   )
 }
 
-function PaymentResultPage({ outcome, paymentData }) {
+function PaymentResultPage({ outcome, paymentData, onSignIn }) {
   const paymentStatus = String(paymentData?.status || '').toUpperCase()
   const isVerifiedSuccess = outcome === 'success' && paymentStatus === 'COMPLETE'
   const isFailure = outcome === 'failure'
-  const [cartState, setCartState] = useState(isVerifiedSuccess ? 'clearing' : 'ready')
-  const [cartError, setCartError] = useState('')
-  const clearStarted = useRef(false)
   const amount = Number(paymentData?.total_amount)
   const hasAmount = Number.isFinite(amount) && amount > 0
   const transactionId =
     paymentData?.transaction_code || paymentData?.transaction_uuid || 'Not provided'
-
-  async function clearCart() {
-    setCartState('clearing')
-    setCartError('')
-    try {
-      await api('/api/cart', { method: 'DELETE' })
-      setCartState('cleared')
-    } catch (err) {
-      setCartState('error')
-      setCartError(err.message || 'Please try again.')
-    }
-  }
-
-  useEffect(() => {
-    if (!isVerifiedSuccess || clearStarted.current) return
-    clearStarted.current = true
-    clearCart()
-  }, [isVerifiedSuccess])
-
-  function returnToStore() {
-    window.location.assign('/')
-  }
 
   const title = isVerifiedSuccess
     ? 'Payment complete'
@@ -113,10 +82,10 @@ function PaymentResultPage({ outcome, paymentData }) {
       ? 'Payment not completed'
       : 'Payment response unavailable'
   const description = isVerifiedSuccess
-    ? 'Your eSewa payment was confirmed successfully.'
+    ? 'Sign in and we will confirm your order straight away.'
     : isFailure
-      ? 'No payment was completed, so your cart has been kept.'
-      : 'We could not verify the eSewa response, so your cart was not changed.'
+      ? 'No payment was completed, so your order is still unpaid.'
+      : 'We could not read the eSewa response, so your order was not changed.'
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-12 text-ink">
@@ -180,43 +149,16 @@ function PaymentResultPage({ outcome, paymentData }) {
             </dl>
           )}
 
-          <div
-            role="status"
-            aria-live="polite"
-            className={`mt-6 rounded-2xl px-4 py-3 text-center font-sans text-sm font-semibold ${
-              isVerifiedSuccess && cartState === 'error'
-                ? 'bg-rose-soft text-rose-deep'
-                : 'bg-teal-100/70 text-teal-700'
-            }`}
-          >
-            {isVerifiedSuccess && cartState === 'clearing' && 'Updating your cart…'}
-            {isVerifiedSuccess && cartState === 'cleared' && 'Your cart has been emptied.'}
-            {isVerifiedSuccess && cartState === 'error' &&
-              'Your payment succeeded, but the cart could not be cleared.'}
-            {!isVerifiedSuccess && 'Your cart has not been changed.'}
-          </div>
-
-          {isVerifiedSuccess && cartState === 'error' && (
-            <>
-              <p className="mt-3 text-center font-sans text-xs font-medium text-rose-deep">
-                {cartError}
-              </p>
-              <button
-                type="button"
-                onClick={clearCart}
-                className="mx-auto mt-4 block rounded-full border border-rose/40 px-5 py-2.5 font-sans text-sm font-bold text-rose-deep transition hover:bg-rose-soft"
-              >
-                Retry cart update
-              </button>
-            </>
-          )}
+          <p className="mt-6 rounded-2xl bg-teal-100/70 px-4 py-3 text-center font-sans text-sm font-semibold text-teal-700">
+            You are signed out, so this order has not been updated yet.
+          </p>
 
           <button
             type="button"
-            onClick={returnToStore}
-            className="mt-6 flex w-full items-center justify-center rounded-full bg-teal-600 px-5 py-3 font-sans text-sm font-bold text-white shadow-sm transition hover:bg-teal-700 active:scale-[0.99]"
+            onClick={onSignIn}
+            className="mt-6 flex w-full items-center justify-center gap-2 rounded-full bg-teal-600 px-5 py-3 font-sans text-sm font-bold text-white shadow-sm transition hover:bg-teal-700 active:scale-[0.99]"
           >
-            {isVerifiedSuccess ? 'Continue shopping' : 'Return to store'}
+            Sign in to finish
           </button>
         </div>
       </section>
@@ -227,6 +169,7 @@ function PaymentResultPage({ outcome, paymentData }) {
 function App() {
   const [user, setUser] = useState(null)
   const [booting, setBooting] = useState(true)
+  const [showAuth, setShowAuth] = useState(false)
   const paymentRoute = getPaymentRoute()
   const paymentData = decodePaymentData()
   const paymentStatus = String(paymentData?.status || '').toUpperCase()
@@ -255,10 +198,16 @@ function App() {
 
   if (booting) return <Splash />
 
-  if (!user) return <AuthPage onAuthed={setUser} />
-
-  if (paymentOutcome) {
-    return <PaymentResultPage outcome={paymentOutcome} paymentData={paymentData} />
+  if (!user) {
+    return paymentOutcome && !showAuth ? (
+      <PaymentResultPage
+        outcome={paymentOutcome}
+        paymentData={paymentData}
+        onSignIn={() => setShowAuth(true)}
+      />
+    ) : (
+      <AuthPage onAuthed={setUser} />
+    )
   }
 
   if (user.role === 'admin') return <AdminPanel user={user} onLogout={logout} />
